@@ -2,26 +2,207 @@
 @tailwind components;
 @tailwind utilities;
 
-:root {
-  --background: #ffffff;
-  --foreground: #171717;
+/* Leaflet map sizing */
+.leaflet-container {
+  width: 100%;
+  height: 100%;
 }
+/* ========================================
+   CUSTOM MAP STYLES - Add to globals.css
+   ======================================== */
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
+/* Smooth marker animations */
+@keyframes bounce-subtle {
+  0%, 100% {
+    transform: translateY(0) scale(1.25);
+  }
+  50% {
+    transform: translateY(-5px) scale(1.25);
   }
 }
 
-body {
-  color: var(--foreground);
-  background: var(--background);
-  font-family: Arial, Helvetica, sans-serif;
+.animate-bounce-subtle {
+  animation: bounce-subtle 2s ease-in-out infinite;
 }
 
-@layer utilities {
-  .text-balance {
-    text-wrap: balance;
+/* Smooth marker transitions */
+.custom-pin-marker {
+  transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.custom-pin-marker:hover {
+  filter: brightness(1.1);
+}
+
+/* Custom popup styling */
+.leaflet-popup-content-wrapper {
+  border-radius: 12px;
+  padding: 0;
+  box-shadow: 0 10px 25px rgba(0, 0, 0, 0.15);
+  border: 1px solid rgba(226, 232, 240, 0.8);
+  overflow: hidden;
+}
+
+.leaflet-popup-content {
+  margin: 0;
+  width: auto !important;
+}
+
+.leaflet-popup-tip {
+  box-shadow: 0 3px 14px rgba(0, 0, 0, 0.1);
+}
+
+/* Smooth popup animations */
+.leaflet-popup {
+  animation: popup-appear 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+@keyframes popup-appear {
+  from {
+    opacity: 0;
+    transform: translateY(10px) scale(0.95);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+/* Mobile touch improvements */
+@media (max-width: 768px) {
+  .leaflet-container {
+    -webkit-tap-highlight-color: transparent;
+    touch-action: pan-x pan-y;
+  }
+  
+  .leaflet-popup-content-wrapper {
+    border-radius: 16px;
+    max-width: 90vw !important;
+  }
+  
+  .custom-pin-marker {
+    cursor: pointer;
+  }
+}
+
+/* Smooth tile loading */
+.leaflet-tile {
+  transition: opacity 0.3s ease-in-out;
+}
+
+.leaflet-tile-loaded {
+  opacity: 1;
+}
+
+/* Map container smooth rendering */
+.leaflet-container {
+  background: linear-gradient(to bottom, #f1f5f9, #e2e8f0);
+  font-family: inherit;
+}
+
+/* Zoom controls styling (if needed) */
+.leaflet-control-zoom {
+  border: none !important;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1) !important;
+  border-radius: 12px !important;
+  overflow: hidden;
+}
+
+.leaflet-control-zoom a {
+  width: 40px !important;
+  height: 40px !important;
+  line-height: 40px !important;
+  font-size: 20px !important;
+  border: none !important;
+  background: white !important;
+  color: #334155 !important;
+  transition: all 0.2s ease !important;
+}
+
+.leaflet-control-zoom a:hover {
+  background: #f1f5f9 !important;
+  color: #2563eb !important;
+}
+
+.leaflet-control-zoom a:first-child {
+  border-bottom: 1px solid #e2e8f0 !important;
+}
+
+/* Smooth marker cluster animations (if you add clustering later) */
+.marker-cluster {
+  transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+/* Responsive marker sizing */
+@media (max-width: 640px) {
+  .custom-pin-marker svg {
+    width: 32px;
+    height: 32px;
+  }
+}
+
+/* Loading state improvements */
+.leaflet-container.leaflet-touch-drag.leaflet-touch-zoom {
+  -webkit-user-select: none;
+  -moz-user-select: none;
+  -ms-user-select: none;
+  user-select: none;
+}
+
+/* Improve attribution styling */
+.leaflet-control-attribution {
+  background: rgba(255, 255, 255, 0.8) !important;
+  backdrop-filter: blur(8px);
+  border-radius: 8px 0 0 0 !important;
+  padding: 4px 8px !important;
+  font-size: 10px !important;
+  opacity: 0.7;
+  transition: opacity 0.2s ease;
+}
+
+.leaflet-control-attribution:hover {
+  opacity: 1;
+}
+
+/* Mobile attribution */
+@media (max-width: 768px) {
+  .leaflet-control-attribution {
+    font-size: 9px !important;
+    padding: 3px 6px !important;
+  }
+}
+
+/* Smooth panning */
+.leaflet-fade-anim .leaflet-popup {
+  transition: opacity 0.2s linear;
+}
+
+/* Performance optimization */
+.leaflet-container {
+  will-change: transform;
+}
+
+.leaflet-zoom-animated {
+  will-change: transform;
+}
+
+/* Custom scrollbar for popups on desktop */
+@media (min-width: 768px) {
+  .leaflet-popup-content::-webkit-scrollbar {
+    width: 6px;
+  }
+
+  .leaflet-popup-content::-webkit-scrollbar-track {
+    background: #f1f5f9;
+    border-radius: 3px;
+  }
+
+  .leaflet-popup-content::-webkit-scrollbar-thumb {
+    background: #cbd5e1;
+    border-radius: 3px;
+  }
+
+  .leaflet-popup-content::-webkit-scrollbar-thumb:hover {
+    background: #94a3b8;
   }
 }
