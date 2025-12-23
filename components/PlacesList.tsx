@@ -36,7 +36,9 @@ type ListContentProps = {
 
 /* ---------------- Helpers ---------------- */
 
-function formatAddress(tags?: Record<string, string>) {
+function formatAddress(
+  tags?: Record<string, string | undefined>
+) {
   if (!tags) return null;
 
   const parts = [
@@ -44,11 +46,12 @@ function formatAddress(tags?: Record<string, string>) {
     tags["addr:street"],
     tags["addr:suburb"],
     tags["addr:city"],
-  ].filter(Boolean);
+  ].filter(
+    (v): v is string => typeof v === "string" && v.length > 0
+  );
 
-  return parts.length ? parts.join(", ") : null;
+  return parts.length > 0 ? parts.join(", ") : null;
 }
-
 function openDirections(lat: number, lon: number) {
   const url = `https://www.google.com/maps/dir/?api=1&destination=${lat},${lon}`;
   window.open(url, "_blank");
