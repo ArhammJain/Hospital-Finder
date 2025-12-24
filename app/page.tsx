@@ -12,7 +12,25 @@ const MapView = dynamic(() => import("@/components/MapView"), {
 
 type SheetState = "collapsed" | "mid" | "expanded";
 
-/* ---------------- Radius logic ---------------- */
+/* ---------------- Type definitions ---------------- */
+
+interface OverpassElement {
+  id: number;
+  lat?: number;
+  lon?: number;
+  tags?: {
+    name?: string;
+    amenity?: string;
+    [key: string]: string | undefined;
+  };
+  type?: string;
+}
+
+interface OverpassResponse {
+  elements: OverpassElement[];
+}
+
+/* ---------------- Radius calculation with improved logic ---------------- */
 
 function getRadiusFromBoundingBox(bbox: string[]): number {
   const south = Number(bbox[0]);
@@ -20,14 +38,18 @@ function getRadiusFromBoundingBox(bbox: string[]): number {
   const west = Number(bbox[2]);
   const east = Number(bbox[3]);
 
+  // Calculate approximate area in square degrees
   const area = Math.abs(north - south) * Math.abs(east - west);
 
-  if (area > 0.5) return 25000;
-  if (area > 0.1) return 15000;
-  return 8000;
+  // More generous radius calculations for better results
+  if (area > 1.0) return 50000; // Very large metropolitan area
+  if (area > 0.5) return 30000; // Large city
+  if (area > 0.1) return 20000; // Medium city
+  if (area > 0.01) return 10000; // Small city
+  return 5000; // Small area or town
 }
 
-/* ---------------- FINAL Overpass fetch ---------------- */
+/* ---------------- Overpass API fetch with proper error handling ---------------- */
 
 async function fetchHospitals(
   lat: number,
@@ -38,9 +60,13 @@ async function fetchHospitals(
 [out:json][timeout:25];
 (
   node["amenity"="hospital"](around:${radius},${lat},${lon});
+  way["amenity"="hospital"](around:${radius},${lat},${lon});
   node["amenity"="clinic"](around:${radius},${lat},${lon});
+  way["amenity"="clinic"](around:${radius},${lat},${lon});
 );
 out body;
+>;
+out skel qt;
 `;
 
   const controller = new AbortController();
@@ -56,19 +82,45 @@ out body;
       signal: controller.signal,
     });
 
-    if (!res.ok) return [];
+    if (!res.ok) {
+      console.error("Overpass API error:", res.status, res.statusText);
+      throw new Error(`Overpass API returned ${res.status}`);
+    }
 
-    const data = await res.json();
-    return data.elements ?? [];
+    const data: OverpassResponse = await res.json();
+    
+    if (!data.elements) {
+      return [];
+    }
+
+    // Filter and process results
+    const places: Place[] = data.elements
+      .filter((el): el is OverpassElement & { lat: number; lon: number; tags: NonNullable<OverpassElement['tags']> & { name: string } } => 
+        typeof el.lat === 'number' && 
+        typeof el.lon === 'number' && 
+        el.tags?.name !== undefined
+      )
+      .map((el) => ({
+        id: el.id,
+        lat: el.lat,
+        lon: el.lon,
+        tags: el.tags,
+      }));
+
+    return places;
   } catch (err) {
-    console.error("Overpass failed", err);
-    return [];
+    if (err instanceof Error && err.name === "AbortError") {
+      console.error("Overpass API request timed out");
+      throw new Error("Request timed out. Please try again.");
+    }
+    console.error("Overpass API failed:", err);
+    throw err;
   } finally {
     clearTimeout(timeout);
   }
 }
 
-/* ================= PAGE ================= */
+/* ================= Main Page Component ================= */
 
 export default function Page() {
   const [city, setCity] = useState("");
@@ -76,36 +128,85 @@ export default function Page() {
   const [places, setPlaces] = useState<Place[]>([]);
   const [selectedId, setSelectedId] = useState<number | null>(null);
   const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
   const [sheetState, setSheetState] = useState<SheetState>("mid");
 
   async function search() {
-    if (!city) return;
+    if (!city.trim()) {
+      setError("Please enter a city name");
+      return;
+    }
 
     setLoading(true);
     setPlaces([]);
     setSelectedId(null);
+    setError(null);
 
     try {
-      const geo = await fetch(`/api/geocode?city=${city}`).then((r) =>
-        r.json()
+      // Step 1: Geocode the city
+      const geoRes = await fetch(
+        `/api/geocode?city=${encodeURIComponent(city.trim())}`
       );
 
-      if (!geo) {
-        setLoading(false);
-        return;
+      if (!geoRes.ok) {
+        throw new Error("Failed to find city location");
+      }
+
+      const geo = await geoRes.json();
+
+      if (!geo || !geo.lat || !geo.lon) {
+        throw new Error("City not found. Please check the spelling and try again.");
       }
 
       const lat = Number(geo.lat);
       const lon = Number(geo.lon);
+
+      // Validate coordinates
+      if (isNaN(lat) || isNaN(lon)) {
+        throw new Error("Invalid location data received");
+      }
+
       setCenter([lat, lon]);
 
-      const radius = getRadiusFromBoundingBox(geo.boundingbox);
+      // Step 2: Calculate search radius
+      const radius = geo.boundingbox
+        ? getRadiusFromBoundingBox(geo.boundingbox)
+        : 15000; // Default fallback
 
-      const results = await fetchHospitals(lat, lon, radius);
+      // Step 3: Fetch hospitals and clinics
+      let results = await fetchHospitals(lat, lon, radius);
+
+      // Step 4: If no results, try with a larger radius
+      if (results.length === 0 && radius < 30000) {
+        console.log("No results found, expanding search radius...");
+        results = await fetchHospitals(lat, lon, Math.min(radius * 2, 50000));
+      }
+
+      if (results.length === 0) {
+        setError(
+          "No hospitals or clinics found in this area. Try searching for a larger city nearby."
+        );
+      } else {
+        // Sort by distance from center (optional)
+        results.sort((a, b) => {
+          const distA = Math.sqrt(
+            Math.pow(a.lat - lat, 2) + Math.pow(a.lon - lon, 2)
+          );
+          const distB = Math.sqrt(
+            Math.pow(b.lat - lat, 2) + Math.pow(b.lon - lon, 2)
+          );
+          return distA - distB;
+        });
+      }
 
       setPlaces(results);
-    } catch (e) {
-      console.error("Search error", e);
+    } catch (err) {
+      console.error("Search error:", err);
+      const errorMessage =
+        err instanceof Error
+          ? err.message
+          : "An error occurred while searching. Please try again.";
+      setError(errorMessage);
       setPlaces([]);
     } finally {
       setLoading(false);
@@ -121,25 +222,52 @@ export default function Page() {
     }
   }
 
+  function handleRetry() {
+    setError(null);
+    if (city.trim()) {
+      search();
+    }
+  }
+
   return (
-    // Main Container: Uses 100dvh for better mobile browser support
     <div className="relative flex flex-col h-[100dvh] w-full overflow-hidden bg-neutral-100 md:flex-row">
-      
-      {/* UI Overlay Container 
-        - Mobile: Absolute overlay with pointer-events-none (so you can click the map through it)
-        - Desktop: Relative sidebar with shadow
-      */}
+      {/* UI Overlay Container */}
       <div className="absolute inset-0 z-20 flex flex-col justify-between pointer-events-none md:pointer-events-auto md:relative md:inset-auto md:h-full md:w-[400px] md:justify-start md:bg-white md:shadow-2xl md:border-r border-neutral-200">
-        
         {/* Top Search Area */}
         <div className="pointer-events-auto w-full p-4 md:p-6 md:pb-4">
-          <div className="shadow-lg md:shadow-none rounded-xl bg-white/90 backdrop-blur-md md:bg-transparent md:backdrop-blur-none p-1 md:p-0 ring-1 ring-black/5 md:ring-0">
-            <SearchBar
-              value={city}
-              onChange={setCity}
-              onSearch={search}
-            />
+          <div className="shadow-lg md:shadow-none rounded-xl bg-white/95 backdrop-blur-md md:bg-transparent md:backdrop-blur-none p-1 md:p-0 ring-1 ring-black/5 md:ring-0">
+            <SearchBar value={city} onChange={setCity} onSearch={search} />
           </div>
+
+          {/* Error Display */}
+          {error && (
+            <div className="mt-3 p-3 bg-red-50 border border-red-200 rounded-lg shadow-sm">
+              <div className="flex items-start gap-2">
+                <svg
+                  className="w-5 h-5 text-red-500 flex-shrink-0 mt-0.5"
+                  fill="none"
+                  viewBox="0 0 24 24"
+                  stroke="currentColor"
+                >
+                  <path
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    strokeWidth={2}
+                    d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"
+                  />
+                </svg>
+                <div className="flex-1">
+                  <p className="text-sm text-red-800">{error}</p>
+                  <button
+                    onClick={handleRetry}
+                    className="mt-2 text-xs text-red-600 hover:text-red-700 font-medium underline"
+                  >
+                    Try again
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
         </div>
 
         {/* Bottom List Area */}
