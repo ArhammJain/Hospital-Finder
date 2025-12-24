@@ -16,7 +16,7 @@
 
 <h2>🚀 Demo</h2>
 
-[Hospital Finder By Arham](hospitalfinderbyarham.vercel.app)
+[hospitalfinderbyarham.vercel.app](hospitalfinderbyarham.vercel.app)
 
 <h2>✨ Key Features</h2>
 
