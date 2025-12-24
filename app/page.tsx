@@ -18,19 +18,27 @@ interface OverpassElement {
   id: number;
   lat?: number;
   lon?: number;
+  center?: {
+    lat: number;
+    lon: number;
+  };
   tags?: {
     name?: string;
     amenity?: string;
+    healthcare?: string;
     [key: string]: string | undefined;
   };
   type?: string;
 }
 
 interface OverpassResponse {
+  version: number;
+  generator: string;
   elements: OverpassElement[];
+  remark?: string;
 }
 
-/* ---------------- Radius calculation with improved logic ---------------- */
+/* ---------------- Radius calculation ---------------- */
 
 function getRadiusFromBoundingBox(bbox: string[]): number {
   const south = Number(bbox[0]);
@@ -38,111 +46,133 @@ function getRadiusFromBoundingBox(bbox: string[]): number {
   const west = Number(bbox[2]);
   const east = Number(bbox[3]);
 
-  // Calculate approximate area in square degrees
   const area = Math.abs(north - south) * Math.abs(east - west);
 
-  // More generous radius calculations for better results
-  if (area > 1.0) return 50000; // Very large metropolitan area
-  if (area > 0.5) return 30000; // Large city
-  if (area > 0.1) return 20000; // Medium city
-  if (area > 0.01) return 10000; // Small city
-  return 5000; // Small area or town
+  // Start with generous radius
+  if (area > 1.0) return 50000;
+  if (area > 0.5) return 30000;
+  if (area > 0.1) return 20000;
+  if (area > 0.01) return 10000;
+  return 8000;
 }
 
-/* ---------------- Overpass API fetch with proper error handling ---------------- */
+/* ---------------- Fixed Overpass API fetch ---------------- */
 
 async function fetchHospitals(
   lat: number,
   lon: number,
   radius: number
 ): Promise<Place[]> {
-  console.log(`🔍 Searching for hospitals around [${lat}, ${lon}] with radius ${radius}m`);
-  
-  // Simplified query that's more reliable
-  const query = `
-[out:json][timeout:30];
+  console.log(`🔍 Searching hospitals at [${lat}, ${lon}] radius: ${radius}m`);
+
+  // FIXED: Proper Overpass QL query with correct syntax
+  const query = `[out:json][timeout:30];
 (
   node["amenity"="hospital"](around:${radius},${lat},${lon});
+  way["amenity"="hospital"](around:${radius},${lat},${lon});
   node["amenity"="clinic"](around:${radius},${lat},${lon});
+  way["amenity"="clinic"](around:${radius},${lat},${lon});
   node["healthcare"="hospital"](around:${radius},${lat},${lon});
-  node["healthcare"="clinic"](around:${radius},${lat},${lon});
+  way["healthcare"="hospital"](around:${radius},${lat},${lon});
 );
-out body;
-`;
-
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 35000); // 35s timeout
+out center;`;
 
   try {
-    console.log("📡 Sending request to Overpass API...");
-    
-    const res = await fetch("https://overpass-api.de/api/interpreter", {
+    console.log("📡 Calling Overpass API...");
+
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 35000);
+
+    const response = await fetch("https://overpass-api.de/api/interpreter", {
       method: "POST",
+      body: query,
       headers: {
-        "Content-Type": "application/x-www-form-urlencoded;charset=UTF-8",
+        "Content-Type": "application/x-www-form-urlencoded",
       },
-      body: `data=${encodeURIComponent(query)}`,
       signal: controller.signal,
     });
 
-    if (!res.ok) {
-      console.error("❌ Overpass API error:", res.status, res.statusText);
-      throw new Error(`Overpass API returned ${res.status}`);
+    clearTimeout(timeoutId);
+
+    if (!response.ok) {
+      console.error(`❌ HTTP ${response.status}: ${response.statusText}`);
+      
+      // Try to read error message
+      const text = await response.text();
+      console.error("Response:", text);
+      
+      throw new Error(`Overpass API error: ${response.status}`);
     }
 
-    const data: OverpassResponse = await res.json();
-    console.log("✅ Received response from Overpass API");
-    console.log(`📊 Total elements received: ${data.elements?.length || 0}`);
-    
+    const contentType = response.headers.get("content-type");
+    console.log("📄 Content-Type:", contentType);
+
+    const data: OverpassResponse = await response.json();
+    console.log("✅ Response received");
+    console.log("📊 Elements:", data.elements?.length || 0);
+
+    if (data.remark) {
+      console.warn("⚠️ Remark:", data.remark);
+    }
+
     if (!data.elements || data.elements.length === 0) {
-      console.log("⚠️ No elements in response");
+      console.log("⚠️ No elements returned");
       return [];
     }
 
-    // Log first few elements for debugging
-    console.log("Sample elements:", data.elements.slice(0, 3));
+    // Process results - handle both nodes and ways
+    const places: Place[] = [];
 
-    // Filter and process results - more lenient filtering
-    const places: Place[] = data.elements
-      .filter((el): el is OverpassElement & { lat: number; lon: number; tags: NonNullable<OverpassElement['tags']> } => {
-        const hasCoords = typeof el.lat === 'number' && typeof el.lon === 'number';
-        const hasTags = el.tags !== undefined;
-        
-        if (!hasCoords) {
-          console.log("❌ Element missing coordinates:", el.id);
-        }
-        
-        return hasCoords && hasTags;
-      })
-      .map((el) => ({
-        id: el.id,
-        lat: el.lat,
-        lon: el.lon,
-        tags: el.tags,
-      }));
+    for (const el of data.elements) {
+      // For nodes, use lat/lon directly
+      // For ways, use center coordinates
+      const elementLat = el.lat ?? el.center?.lat;
+      const elementLon = el.lon ?? el.center?.lon;
 
-    console.log(`✨ Filtered to ${places.length} valid places`);
-    
-    // Log places without names for debugging
-    const withoutNames = places.filter(p => !p.tags?.name);
-    if (withoutNames.length > 0) {
-      console.log(`ℹ️ ${withoutNames.length} places without names`);
+      if (
+        typeof elementLat === "number" &&
+        typeof elementLon === "number" &&
+        el.tags
+      ) {
+        places.push({
+          id: el.id,
+          lat: elementLat,
+          lon: elementLon,
+          tags: el.tags,
+        });
+      } else {
+        console.log("⚠️ Skipping element without coordinates:", el.id);
+      }
+    }
+
+    console.log(`✨ Processed ${places.length} valid places`);
+
+    // Debug: show sample of what we got
+    if (places.length > 0) {
+      console.log("Sample place:", {
+        id: places[0].id,
+        name: places[0].tags?.name || "Unnamed",
+        amenity: places[0].tags?.amenity,
+        lat: places[0].lat,
+        lon: places[0].lon,
+      });
     }
 
     return places;
   } catch (err) {
-    if (err instanceof Error && err.name === "AbortError") {
-      console.error("⏱️ Overpass API request timed out");
-      throw new Error("Request timed out. Please try again.");
+    if (err instanceof Error) {
+      if (err.name === "AbortError") {
+        console.error("⏱️ Request timed out");
+        throw new Error("Request timed out. The server is slow, try again.");
+      }
+      console.error("❌ Error:", err.message);
+      throw err;
     }
-    console.error("❌ Overpass API failed:", err);
-    throw err;
-  } finally {
-    clearTimeout(timeout);
+    throw new Error("Unknown error occurred");
   }
 }
 
-/* ================= Main Page Component ================= */
+/* ================= Main Component ================= */
 
 export default function Page() {
   const [city, setCity] = useState("");
@@ -164,75 +194,82 @@ export default function Page() {
     setSelectedId(null);
     setError(null);
 
+    console.log("\n🌍 ========== NEW SEARCH ==========");
+    console.log("City:", city);
+
     try {
-      console.log(`🌍 Starting search for: ${city}`);
-      
-      // Step 1: Geocode the city
+      // Step 1: Geocode
+      console.log("📍 Step 1: Geocoding...");
       const geoRes = await fetch(
         `/api/geocode?city=${encodeURIComponent(city.trim())}`
       );
 
       if (!geoRes.ok) {
-        throw new Error("Failed to find city location");
+        throw new Error(`Geocoding failed: ${geoRes.status}`);
       }
 
       const geo = await geoRes.json();
-      console.log("📍 Geocode result:", geo);
+      console.log("Geocode result:", geo);
 
       if (!geo || !geo.lat || !geo.lon) {
-        throw new Error("City not found. Please check the spelling and try again.");
+        throw new Error("City not found");
       }
 
       const lat = Number(geo.lat);
       const lon = Number(geo.lon);
 
-      // Validate coordinates
       if (isNaN(lat) || isNaN(lon)) {
-        throw new Error("Invalid location data received");
+        throw new Error("Invalid coordinates");
       }
 
-      console.log(`✓ Valid coordinates: [${lat}, ${lon}]`);
+      console.log(`✓ Coordinates: [${lat}, ${lon}]`);
       setCenter([lat, lon]);
 
-      // Step 2: Calculate search radius
-      const initialRadius = geo.boundingbox
+      // Step 2: Calculate radius
+      const baseRadius = geo.boundingbox
         ? getRadiusFromBoundingBox(geo.boundingbox)
         : 15000;
-      
-      console.log(`📏 Initial radius: ${initialRadius}m`);
 
-      // Step 3: Try multiple radius values if needed
-      const radiusesToTry = [
-        initialRadius,
-        Math.min(initialRadius * 2, 50000),
-        50000, // Max radius as last resort
+      console.log(`📏 Base radius: ${baseRadius}m`);
+
+      // Step 3: Try progressively larger radii
+      const attempts = [
+        { radius: baseRadius, label: "initial" },
+        { radius: Math.min(baseRadius * 1.5, 40000), label: "expanded" },
+        { radius: 50000, label: "maximum" },
       ];
 
       let results: Place[] = [];
-      
-      for (let i = 0; i < radiusesToTry.length; i++) {
-        const radius = radiusesToTry[i];
-        console.log(`🔄 Attempt ${i + 1}/${radiusesToTry.length} with radius ${radius}m`);
+
+      for (let i = 0; i < attempts.length; i++) {
+        const { radius, label } = attempts[i];
         
-        results = await fetchHospitals(lat, lon, radius);
-        
-        if (results.length > 0) {
-          console.log(`✅ Found ${results.length} results!`);
-          break;
+        console.log(`\n🔄 Attempt ${i + 1}/${attempts.length} (${label}): ${radius}m`);
+
+        try {
+          results = await fetchHospitals(lat, lon, radius);
+
+          if (results.length > 0) {
+            console.log(`✅ SUCCESS: Found ${results.length} results`);
+            break;
+          }
+
+          console.log("⚠️ No results, trying next radius...");
+        } catch (attemptError) {
+          console.error(`❌ Attempt ${i + 1} failed:`, attemptError);
+          
+          // If this is the last attempt, throw the error
+          if (i === attempts.length - 1) {
+            throw attemptError;
+          }
+          
+          // Otherwise, continue to next attempt
+          console.log("Continuing to next attempt...");
         }
-        
-        console.log(`⚠️ No results with radius ${radius}m, trying larger area...`);
       }
 
-      if (results.length === 0) {
-        console.log("❌ No results found after all attempts");
-        setError(
-          "No hospitals or clinics found in this area. This might be a remote location. Try searching for a larger city nearby."
-        );
-      } else {
-        console.log(`🎯 Final result count: ${results.length}`);
-        
-        // Sort by distance from center
+      // Sort by distance
+      if (results.length > 0) {
         results.sort((a, b) => {
           const distA = Math.sqrt(
             Math.pow(a.lat - lat, 2) + Math.pow(a.lon - lon, 2)
@@ -242,22 +279,29 @@ export default function Page() {
           );
           return distA - distB;
         });
-        
+
         console.log("✨ Results sorted by distance");
+      } else {
+        console.log("❌ No results found after all attempts");
+        setError(
+          "No hospitals or clinics found in this area. This may be a remote location or the data may not be available in OpenStreetMap."
+        );
       }
 
       setPlaces(results);
+      console.log("\n🏁 Search complete:", results.length, "places");
     } catch (err) {
-      console.error("💥 Search error:", err);
+      console.error("\n💥 SEARCH FAILED:", err);
+      
       const errorMessage =
         err instanceof Error
           ? err.message
-          : "An error occurred while searching. Please try again.";
+          : "Search failed. Please try again.";
+      
       setError(errorMessage);
       setPlaces([]);
     } finally {
       setLoading(false);
-      console.log("🏁 Search complete");
     }
   }
 
@@ -279,9 +323,9 @@ export default function Page() {
 
   return (
     <div className="relative flex flex-col h-[100dvh] w-full overflow-hidden bg-neutral-100 md:flex-row">
-      {/* UI Overlay Container */}
+      {/* UI Overlay */}
       <div className="absolute inset-0 z-20 flex flex-col justify-between pointer-events-none md:pointer-events-auto md:relative md:inset-auto md:h-full md:w-[400px] md:justify-start md:bg-white md:shadow-2xl md:border-r border-neutral-200">
-        {/* Top Search Area */}
+        {/* Search Bar */}
         <div className="pointer-events-auto w-full p-4 md:p-6 md:pb-4">
           <div className="shadow-lg md:shadow-none rounded-xl bg-white/95 backdrop-blur-md md:bg-transparent md:backdrop-blur-none p-1 md:p-0 ring-1 ring-black/5 md:ring-0">
             <SearchBar value={city} onChange={setCity} onSearch={search} />
@@ -316,9 +360,16 @@ export default function Page() {
               </div>
             </div>
           )}
+
+          {/* Debug Info - Remove this in production */}
+          {process.env.NODE_ENV === "development" && (
+            <div className="mt-2 text-xs text-gray-500">
+              Debug: Open browser console (F12) to see detailed logs
+            </div>
+          )}
         </div>
 
-        {/* Bottom List Area */}
+        {/* Places List */}
         <div className="pointer-events-auto w-full md:flex-1 md:overflow-hidden md:flex md:flex-col">
           <PlacesList
             places={places}
@@ -331,7 +382,7 @@ export default function Page() {
         </div>
       </div>
 
-      {/* Desktop Map Container (Right Side) */}
+      {/* Desktop Map */}
       <div className="hidden md:block flex-1 relative h-full bg-neutral-200">
         <MapView
           center={center}
@@ -341,7 +392,7 @@ export default function Page() {
         />
       </div>
 
-      {/* Mobile Map Background (Full Screen Behind UI) */}
+      {/* Mobile Map */}
       <div className="absolute inset-0 z-0 md:hidden bg-neutral-200">
         <MapView
           center={center}
