@@ -1,207 +1,357 @@
 "use client";
 
 import { useState } from "react";
+import dynamic from "next/dynamic";
+import SearchBar from "@/components/SearchBar";
+import PlacesList from "@/components/PlacesList";
+import { Place } from "@/types/place";
+
+const MapView = dynamic(() => import("@/components/MapView"), {
+  ssr: false,
+});
+
+type SheetState = "collapsed" | "mid" | "expanded";
 
 /* ===================== TYPES ===================== */
-
-interface Place {
-  id: number;
-  lat: number;
-  lon: number;
-  tags?: Record<string, string>;
-}
 
 interface OverpassElement {
   type: string;
   id: number;
   lat?: number;
   lon?: number;
-  center?: { lat: number; lon: number };
+  center?: {
+    lat: number;
+    lon: number;
+  };
   tags?: Record<string, string>;
 }
 
-/* ===================== MINIMAL PAGE ===================== */
+interface OverpassResponse {
+  version: number;
+  generator: string;
+  elements: OverpassElement[];
+}
 
-export default function MinimalTest() {
-  const [city, setCity] = useState("");
-  const [places, setPlaces] = useState<Place[]>([]);
-  const [loading, setLoading] = useState(false);
-  const [status, setStatus] = useState("");
+/* ===================== HELPERS ===================== */
 
-  async function search() {
-    if (!city.trim()) return;
+function calculateRadius(bbox?: string[]): number {
+  if (!bbox || bbox.length !== 4) return 15000;
 
-    setLoading(true);
-    setPlaces([]);
-    setStatus("🔍 Starting search...");
+  const [south, north, west, east] = bbox.map(Number);
+  const area = Math.abs(north - south) * Math.abs(east - west);
 
-    try {
-      // Step 1: Geocode
-      setStatus("📍 Finding city location...");
-      const geoRes = await fetch(`/api/geocode?city=${encodeURIComponent(city.trim())}`);
-      const geo = await geoRes.json();
-      
-      if (!geo?.lat || !geo?.lon) {
-        setStatus("❌ City not found");
-        setLoading(false);
-        return;
-      }
+  if (area > 1.0) return 50000;
+  if (area > 0.5) return 35000;
+  if (area > 0.1) return 25000;
+  if (area > 0.01) return 15000;
+  return 10000;
+}
 
-      const lat = parseFloat(geo.lat);
-      const lon = parseFloat(geo.lon);
-      
-      setStatus(`✅ Found: [${lat.toFixed(4)}, ${lon.toFixed(4)}]`);
+/* ===================== OVERPASS API ===================== */
 
-      // Step 2: Fetch hospitals
-      setStatus("🏥 Searching for hospitals...");
-      
-      const query = `[out:json][timeout:25];
+async function fetchPlaces(
+  lat: number,
+  lon: number,
+  radius: number
+): Promise<Place[]> {
+  console.log(`🔍 Fetching: lat=${lat}, lon=${lon}, radius=${radius}m`);
+
+  const query = `[out:json][timeout:30];
 (
-  node["amenity"="hospital"](around:15000,${lat},${lon});
-  way["amenity"="hospital"](around:15000,${lat},${lon});
+  node["amenity"="hospital"](around:${radius},${lat},${lon});
+  way["amenity"="hospital"](around:${radius},${lat},${lon});
+  node["amenity"="clinic"](around:${radius},${lat},${lon});
+  way["amenity"="clinic"](around:${radius},${lat},${lon});
 );
 out center;`;
 
-      console.log("Sending query:", query);
+  console.log("📡 Calling Overpass API...");
 
-      const overpassRes = await fetch("https://overpass-api.de/api/interpreter", {
-        method: "POST",
-        body: query,
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 35000);
+
+  try {
+    const response = await fetch("https://overpass-api.de/api/interpreter", {
+      method: "POST",
+      body: query,
+    });
+
+    clearTimeout(timeoutId);
+
+    console.log(`📨 Status: ${response.status}`);
+
+    if (!response.ok) {
+      const errorText = await response.text();
+      console.error("❌ Error:", errorText.substring(0, 200));
+      throw new Error(`API error: ${response.status}`);
+    }
+
+    const data: OverpassResponse = await response.json();
+    console.log(`📊 Elements: ${data.elements?.length || 0}`);
+
+    if (!data.elements || data.elements.length === 0) {
+      return [];
+    }
+
+    const places: Place[] = [];
+
+    for (const element of data.elements) {
+      const elementLat = element.lat ?? element.center?.lat;
+      const elementLon = element.lon ?? element.center?.lon;
+
+      if (!elementLat || !elementLon || !element.tags) {
+        continue;
+      }
+
+      places.push({
+        id: element.id,
+        lat: elementLat,
+        lon: elementLon,
+        tags: element.tags,
       });
+    }
 
-      console.log("Overpass response status:", overpassRes.status);
+    console.log(`✅ Valid places: ${places.length}`);
+    return places;
+  } catch (error) {
+    if (error instanceof Error && error.name === "AbortError") {
+      console.error("⏱️ Timeout");
+      throw new Error("Request timed out");
+    }
+    throw error;
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
 
-      if (!overpassRes.ok) {
-        const errorText = await overpassRes.text();
-        console.error("Overpass error:", errorText);
-        setStatus(`❌ API Error: ${overpassRes.status}`);
-        setLoading(false);
-        return;
+/* ===================== MAIN COMPONENT ===================== */
+
+export default function Page() {
+  const [city, setCity] = useState("");
+  const [center, setCenter] = useState<[number, number]>([20.5937, 78.9629]);
+  const [places, setPlaces] = useState<Place[]>([]);
+  const [selectedId, setSelectedId] = useState<number | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [sheetState, setSheetState] = useState<SheetState>("mid");
+
+  async function handleSearch() {
+    const trimmedCity = city.trim();
+
+    if (!trimmedCity) {
+      setError("Please enter a city name");
+      return;
+    }
+
+    console.log("\n" + "=".repeat(60));
+    console.log("🌍 SEARCH:", trimmedCity);
+    console.log("=".repeat(60));
+
+    // Reset state
+    setLoading(true);
+    setPlaces([]);
+    setSelectedId(null);
+    setError(null);
+
+    try {
+      // STEP 1: Geocode
+      console.log("📍 Geocoding...");
+      
+      const geoResponse = await fetch(
+        `/api/geocode?city=${encodeURIComponent(trimmedCity)}`
+      );
+
+      console.log(`Geocode status: ${geoResponse.status}`);
+
+      if (!geoResponse.ok) {
+        throw new Error(`Geocoding failed: ${geoResponse.status}`);
       }
 
-      const data = await overpassRes.json();
-      console.log("Overpass data:", data);
+      const geoData = await geoResponse.json();
+      console.log("Geocode data:", geoData);
 
-      if (!data.elements || data.elements.length === 0) {
-        setStatus("⚠️ No hospitals found in this area");
-        setLoading(false);
-        return;
+      if (!geoData?.lat || !geoData?.lon) {
+        throw new Error("City not found");
       }
 
-      // Process results
-      const results: Place[] = [];
-      for (const el of data.elements as OverpassElement[]) {
-        const elLat = el.lat ?? el.center?.lat;
-        const elLon = el.lon ?? el.center?.lon;
-        
-        if (elLat && elLon) {
-          results.push({
-            id: el.id,
-            lat: elLat,
-            lon: elLon,
-            tags: el.tags,
-          });
+      const lat = parseFloat(geoData.lat);
+      const lon = parseFloat(geoData.lon);
+
+      if (isNaN(lat) || isNaN(lon)) {
+        throw new Error("Invalid coordinates");
+      }
+
+      console.log(`✓ Coords: [${lat}, ${lon}]`);
+      setCenter([lat, lon]);
+
+      // STEP 2: Fetch places
+      console.log("\n🏥 Fetching hospitals...");
+
+      const baseRadius = calculateRadius(geoData.boundingbox);
+      console.log(`Base radius: ${baseRadius}m`);
+
+      const attempts = [baseRadius, Math.min(baseRadius * 2, 50000), 50000];
+
+      let results: Place[] = [];
+
+      for (let i = 0; i < attempts.length; i++) {
+        const currentRadius = attempts[i];
+        console.log(`\n🔄 Attempt ${i + 1}/${attempts.length}: ${currentRadius}m`);
+
+        try {
+          results = await fetchPlaces(lat, lon, currentRadius);
+
+          if (results.length > 0) {
+            console.log(`✅ SUCCESS: ${results.length} places found`);
+            break;
+          }
+
+          console.log("⚠️ No results, trying larger radius...");
+        } catch (attemptError) {
+          console.error(`❌ Attempt ${i + 1} failed:`, attemptError);
+          if (i === attempts.length - 1) {
+            throw attemptError;
+          }
         }
       }
 
-      setPlaces(results);
-      setStatus(`✅ Found ${results.length} places!`);
-      console.log("Final results:", results);
+      // STEP 3: Sort results
+      if (results.length > 0) {
+        results.sort((a, b) => {
+          const distA = Math.hypot(a.lat - lat, a.lon - lon);
+          const distB = Math.hypot(b.lat - lat, b.lon - lon);
+          return distA - distB;
+        });
+        console.log("✨ Sorted by distance");
+      } else {
+        console.log("❌ No results after all attempts");
+        setError("No hospitals or clinics found. Try a larger city.");
+      }
 
+      // Update state
+      setPlaces(results);
+      console.log(`\n🎯 FINAL: ${results.length} places`);
+      
     } catch (err) {
-      console.error("Search error:", err);
-      setStatus(`💥 Error: ${err instanceof Error ? err.message : "Unknown error"}`);
+      console.error("\n💥 ERROR:", err);
+
+      const message = err instanceof Error ? err.message : "Search failed";
+      setError(message);
+      setPlaces([]);
+      
     } finally {
+      // CRITICAL: Always set loading to false
+      console.log("🏁 Setting loading to FALSE");
       setLoading(false);
+      console.log("=".repeat(60) + "\n");
     }
   }
 
+  function handleSelect(place: Place) {
+    setSelectedId(place.id);
+    setCenter([place.lat, place.lon]);
+
+    if (window.innerWidth < 768) {
+      setSheetState("expanded");
+    }
+  }
+
+  function handleRetry() {
+    setError(null);
+    if (city.trim()) {
+      handleSearch();
+    }
+  }
+
+  // Debug logging for state changes
+  console.log("🔍 Current State:", { loading, placesCount: places.length, error });
+
   return (
-    <div className="min-h-screen bg-gray-900 text-white p-8">
-      <div className="max-w-4xl mx-auto">
-        <h1 className="text-4xl font-bold mb-8">🏥 Hospital Finder - Debug Mode</h1>
-
-        {/* Search Input */}
-        <div className="mb-8">
-          <div className="flex gap-2">
-            <input
-              type="text"
+    <div className="relative flex flex-col h-[100dvh] w-full overflow-hidden bg-neutral-100 md:flex-row">
+      {/* UI Container */}
+      <div className="absolute inset-0 z-20 flex flex-col justify-between pointer-events-none md:pointer-events-auto md:relative md:inset-auto md:h-full md:w-[400px] md:justify-start md:bg-white md:shadow-2xl md:border-r border-neutral-200">
+        
+        {/* Search Area */}
+        <div className="pointer-events-auto w-full p-4 md:p-6 md:pb-4">
+          <div className="shadow-lg md:shadow-none rounded-xl bg-white/95 backdrop-blur-md md:bg-transparent md:backdrop-blur-none p-1 md:p-0 ring-1 ring-black/5 md:ring-0">
+            <SearchBar
               value={city}
-              onChange={(e) => setCity(e.target.value)}
-              onKeyDown={(e) => e.key === "Enter" && search()}
-              placeholder="Enter city name (e.g., London)"
-              className="flex-1 px-4 py-3 bg-gray-800 border border-gray-700 rounded-lg text-white text-lg focus:outline-none focus:border-blue-500"
+              onChange={setCity}
+              onSearch={handleSearch}
             />
-            <button
-              onClick={search}
-              disabled={loading}
-              className="px-8 py-3 bg-blue-600 hover:bg-blue-700 disabled:bg-gray-700 rounded-lg font-semibold transition-colors"
-            >
-              {loading ? "Searching..." : "Search"}
-            </button>
           </div>
-        </div>
 
-        {/* Status */}
-        {status && (
-          <div className="mb-6 p-4 bg-gray-800 border border-gray-700 rounded-lg">
-            <p className="text-lg font-mono">{status}</p>
-          </div>
-        )}
-
-        {/* Loading */}
-        {loading && (
-          <div className="mb-6 p-8 bg-gray-800 border border-gray-700 rounded-lg text-center">
-            <div className="animate-spin w-12 h-12 border-4 border-blue-500 border-t-transparent rounded-full mx-auto mb-4"></div>
-            <p className="text-gray-400">Scanning area...</p>
-          </div>
-        )}
-
-        {/* Results */}
-        {!loading && places.length > 0 && (
-          <div className="space-y-4">
-            <h2 className="text-2xl font-bold mb-4">
-              📋 Results ({places.length})
-            </h2>
-            {places.map((place) => (
-              <div
-                key={place.id}
-                className="p-4 bg-gray-800 border border-gray-700 rounded-lg hover:border-blue-500 transition-colors"
-              >
-                <h3 className="text-xl font-semibold text-blue-400 mb-2">
-                  {place.tags?.name || "Unnamed Hospital"}
-                </h3>
-                <div className="text-sm text-gray-400 space-y-1">
-                  <p>📍 Coordinates: {place.lat.toFixed(6)}, {place.lon.toFixed(6)}</p>
-                  <p>🏷️ Type: {place.tags?.amenity || place.tags?.healthcare || "hospital"}</p>
-                  {place.tags?.["addr:full"] && (
-                    <p>📬 Address: {place.tags["addr:full"]}</p>
-                  )}
+          {/* Error Message */}
+          {error && (
+            <div className="mt-3 p-3 bg-red-50 border border-red-200 rounded-lg shadow-sm">
+              <div className="flex items-start gap-2">
+                <svg
+                  className="w-5 h-5 text-red-500 flex-shrink-0 mt-0.5"
+                  fill="none"
+                  viewBox="0 0 24 24"
+                  stroke="currentColor"
+                >
+                  <path
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    strokeWidth={2}
+                    d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"
+                  />
+                </svg>
+                <div className="flex-1">
+                  <p className="text-sm text-red-800">{error}</p>
+                  <button
+                    onClick={handleRetry}
+                    className="mt-2 text-xs text-red-600 hover:text-red-700 font-medium underline"
+                  >
+                    Try again
+                  </button>
                 </div>
               </div>
-            ))}
-          </div>
-        )}
+            </div>
+          )}
 
-        {/* No Results */}
-        {!loading && places.length === 0 && status.includes("⚠️") && (
-          <div className="p-8 bg-gray-800 border border-yellow-600 rounded-lg text-center">
-            <p className="text-xl text-yellow-500 mb-2">No results found</p>
-            <p className="text-gray-400">Try searching for a larger city</p>
-          </div>
-        )}
-
-        {/* Instructions */}
-        <div className="mt-12 p-6 bg-gray-800 border border-gray-700 rounded-lg">
-          <h3 className="text-lg font-bold mb-3">📝 Debug Instructions</h3>
-          <ol className="space-y-2 text-gray-300 list-decimal list-inside">
-            <li>Open browser console (F12)</li>
-            <li>Try searching for Bhusawal</li>
-            <li>Check console for detailed logs</li>
-            <li>Look for any error messages</li>
-            <li>If it works here but not in your app, the issue is in PlacesList component</li>
-          </ol>
+          {/* Debug Info (Remove in production) */}
+          {process.env.NODE_ENV === "development" && (
+            <div className="mt-2 p-2 bg-gray-100 rounded text-xs font-mono">
+              <div>Loading: {loading ? "TRUE" : "FALSE"}</div>
+              <div>Places: {places.length}</div>
+              <div>Error: {error || "none"}</div>
+            </div>
+          )}
         </div>
+
+        {/* Places List */}
+        <div className="pointer-events-auto w-full md:flex-1 md:overflow-hidden md:flex md:flex-col">
+          <PlacesList
+            places={places}
+            loading={loading}
+            selectedId={selectedId}
+            sheetState={sheetState}
+            onSheetStateChange={setSheetState}
+            onSelect={handleSelect}
+          />
+        </div>
+      </div>
+
+      {/* Desktop Map */}
+      <div className="hidden md:block flex-1 relative h-full bg-neutral-200">
+        <MapView
+          center={center}
+          places={places}
+          selectedId={selectedId}
+          onSelect={handleSelect}
+        />
+      </div>
+
+      {/* Mobile Map */}
+      <div className="absolute inset-0 z-0 md:hidden bg-neutral-200">
+        <MapView
+          center={center}
+          places={places}
+          selectedId={selectedId}
+          onSelect={handleSelect}
+        />
       </div>
     </div>
   );
