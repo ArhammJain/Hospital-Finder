@@ -56,23 +56,26 @@ async function fetchHospitals(
   lon: number,
   radius: number
 ): Promise<Place[]> {
+  console.log(`🔍 Searching for hospitals around [${lat}, ${lon}] with radius ${radius}m`);
+  
+  // Simplified query that's more reliable
   const query = `
-[out:json][timeout:25];
+[out:json][timeout:30];
 (
   node["amenity"="hospital"](around:${radius},${lat},${lon});
-  way["amenity"="hospital"](around:${radius},${lat},${lon});
   node["amenity"="clinic"](around:${radius},${lat},${lon});
-  way["amenity"="clinic"](around:${radius},${lat},${lon});
+  node["healthcare"="hospital"](around:${radius},${lat},${lon});
+  node["healthcare"="clinic"](around:${radius},${lat},${lon});
 );
 out body;
->;
-out skel qt;
 `;
 
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 30000);
+  const timeout = setTimeout(() => controller.abort(), 35000); // 35s timeout
 
   try {
+    console.log("📡 Sending request to Overpass API...");
+    
     const res = await fetch("https://overpass-api.de/api/interpreter", {
       method: "POST",
       headers: {
@@ -83,23 +86,34 @@ out skel qt;
     });
 
     if (!res.ok) {
-      console.error("Overpass API error:", res.status, res.statusText);
+      console.error("❌ Overpass API error:", res.status, res.statusText);
       throw new Error(`Overpass API returned ${res.status}`);
     }
 
     const data: OverpassResponse = await res.json();
+    console.log("✅ Received response from Overpass API");
+    console.log(`📊 Total elements received: ${data.elements?.length || 0}`);
     
-    if (!data.elements) {
+    if (!data.elements || data.elements.length === 0) {
+      console.log("⚠️ No elements in response");
       return [];
     }
 
-    // Filter and process results
+    // Log first few elements for debugging
+    console.log("Sample elements:", data.elements.slice(0, 3));
+
+    // Filter and process results - more lenient filtering
     const places: Place[] = data.elements
-      .filter((el): el is OverpassElement & { lat: number; lon: number; tags: NonNullable<OverpassElement['tags']> & { name: string } } => 
-        typeof el.lat === 'number' && 
-        typeof el.lon === 'number' && 
-        el.tags?.name !== undefined
-      )
+      .filter((el): el is OverpassElement & { lat: number; lon: number; tags: NonNullable<OverpassElement['tags']> } => {
+        const hasCoords = typeof el.lat === 'number' && typeof el.lon === 'number';
+        const hasTags = el.tags !== undefined;
+        
+        if (!hasCoords) {
+          console.log("❌ Element missing coordinates:", el.id);
+        }
+        
+        return hasCoords && hasTags;
+      })
       .map((el) => ({
         id: el.id,
         lat: el.lat,
@@ -107,13 +121,21 @@ out skel qt;
         tags: el.tags,
       }));
 
+    console.log(`✨ Filtered to ${places.length} valid places`);
+    
+    // Log places without names for debugging
+    const withoutNames = places.filter(p => !p.tags?.name);
+    if (withoutNames.length > 0) {
+      console.log(`ℹ️ ${withoutNames.length} places without names`);
+    }
+
     return places;
   } catch (err) {
     if (err instanceof Error && err.name === "AbortError") {
-      console.error("Overpass API request timed out");
+      console.error("⏱️ Overpass API request timed out");
       throw new Error("Request timed out. Please try again.");
     }
-    console.error("Overpass API failed:", err);
+    console.error("❌ Overpass API failed:", err);
     throw err;
   } finally {
     clearTimeout(timeout);
@@ -143,6 +165,8 @@ export default function Page() {
     setError(null);
 
     try {
+      console.log(`🌍 Starting search for: ${city}`);
+      
       // Step 1: Geocode the city
       const geoRes = await fetch(
         `/api/geocode?city=${encodeURIComponent(city.trim())}`
@@ -153,6 +177,7 @@ export default function Page() {
       }
 
       const geo = await geoRes.json();
+      console.log("📍 Geocode result:", geo);
 
       if (!geo || !geo.lat || !geo.lon) {
         throw new Error("City not found. Please check the spelling and try again.");
@@ -166,28 +191,48 @@ export default function Page() {
         throw new Error("Invalid location data received");
       }
 
+      console.log(`✓ Valid coordinates: [${lat}, ${lon}]`);
       setCenter([lat, lon]);
 
       // Step 2: Calculate search radius
-      const radius = geo.boundingbox
+      const initialRadius = geo.boundingbox
         ? getRadiusFromBoundingBox(geo.boundingbox)
-        : 15000; // Default fallback
+        : 15000;
+      
+      console.log(`📏 Initial radius: ${initialRadius}m`);
 
-      // Step 3: Fetch hospitals and clinics
-      let results = await fetchHospitals(lat, lon, radius);
+      // Step 3: Try multiple radius values if needed
+      const radiusesToTry = [
+        initialRadius,
+        Math.min(initialRadius * 2, 50000),
+        50000, // Max radius as last resort
+      ];
 
-      // Step 4: If no results, try with a larger radius
-      if (results.length === 0 && radius < 30000) {
-        console.log("No results found, expanding search radius...");
-        results = await fetchHospitals(lat, lon, Math.min(radius * 2, 50000));
+      let results: Place[] = [];
+      
+      for (let i = 0; i < radiusesToTry.length; i++) {
+        const radius = radiusesToTry[i];
+        console.log(`🔄 Attempt ${i + 1}/${radiusesToTry.length} with radius ${radius}m`);
+        
+        results = await fetchHospitals(lat, lon, radius);
+        
+        if (results.length > 0) {
+          console.log(`✅ Found ${results.length} results!`);
+          break;
+        }
+        
+        console.log(`⚠️ No results with radius ${radius}m, trying larger area...`);
       }
 
       if (results.length === 0) {
+        console.log("❌ No results found after all attempts");
         setError(
-          "No hospitals or clinics found in this area. Try searching for a larger city nearby."
+          "No hospitals or clinics found in this area. This might be a remote location. Try searching for a larger city nearby."
         );
       } else {
-        // Sort by distance from center (optional)
+        console.log(`🎯 Final result count: ${results.length}`);
+        
+        // Sort by distance from center
         results.sort((a, b) => {
           const distA = Math.sqrt(
             Math.pow(a.lat - lat, 2) + Math.pow(a.lon - lon, 2)
@@ -197,11 +242,13 @@ export default function Page() {
           );
           return distA - distB;
         });
+        
+        console.log("✨ Results sorted by distance");
       }
 
       setPlaces(results);
     } catch (err) {
-      console.error("Search error:", err);
+      console.error("💥 Search error:", err);
       const errorMessage =
         err instanceof Error
           ? err.message
@@ -210,6 +257,7 @@ export default function Page() {
       setPlaces([]);
     } finally {
       setLoading(false);
+      console.log("🏁 Search complete");
     }
   }
 
