@@ -211,7 +211,7 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 
 **Your Name**
 - GitHub: [@ArhammJain](https://github.com/ArhammJain)
-- Instagram: [arham.builds](https:///instagram.com/arham.builds)
+- Instagram: [arhm.in](https:///instagram.com/arhm.in)
 
 <h2>⭐ Star History</h2>
 
@@ -219,4 +219,4 @@ If you find this project useful, please consider giving it a star! ⭐
 
 ---
 
-<p align="center">Follow @arham.builds on Instagram</p>
+<p align="center">Follow @arhm.in on Instagram</p>
